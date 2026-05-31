@@ -1,0 +1,38 @@
+[project]
+name = "northwind-expense-ai-backend"
+version = "0.1.0"
+description = "AI-powered expense review API"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI dependency-injection markers are meant to be called in argument
+# defaults — exempt them from B008 ("function call in default argument").
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Header",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+env = [
+    "ENVIRONMENT=test",
+    "DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:54322/postgres_test",
+]
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["tests/*"]
