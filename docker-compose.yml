@@ -29,7 +29,9 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql://postgres:password@db:5432/postgres
+      # Must use the asyncpg driver — SQLAlchemy's async engine rejects a bare
+      # postgresql:// URL. (seed/ingest scripts strip the +asyncpg prefix themselves.)
+      DATABASE_URL: postgresql+asyncpg://postgres:password@db:5432/postgres
       ENVIRONMENT: development
     ports:
       - "8000:8000"
