@@ -281,6 +281,47 @@ uvicorn app.main:app --reload --port 8000
 > aligns the verdict/status check constraints with the compliance vocabulary
 > (`compliant | flagged | rejected | needs_review`).
 
+### 7. Run the frontend (review UI)
+
+The Next.js app is a business-facing reviewer dashboard. It talks to the backend
+entirely from the browser, so the backend must be running and reachable.
+
+```bash
+cd frontend
+npm install
+cp .env.local.example .env.local   # then adjust if your backend isn't on :8000
+npm run dev
+```
+
+- Frontend: http://localhost:3000
+- Requires the backend at the URL set by `NEXT_PUBLIC_API_BASE_URL`.
+
+**Frontend environment variable**
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:8000/api/v1` | Backend base URL **including** the `/api/v1` prefix. The browser calls this directly, so it must be reachable from the user's machine and allowed by the backend's CORS `ALLOWED_ORIGINS` (defaults to `http://localhost:3000`). |
+
+**Build / type-check**
+
+```bash
+npm run build        # production build
+npm run type-check   # tsc --noEmit, no TypeScript errors
+```
+
+**Pages**
+
+| Route | Purpose |
+|-------|---------|
+| `/` | Dashboard — submissions table with employee/status/date filters |
+| `/submissions/new` | Create a submission for an employee |
+| `/submissions/[id]` | Submission detail — employee context, receipt upload, **Run AI Review**, receipt/verdict cards, override |
+| `/policy` | Policy semantic search (retrieval only) |
+
+The UI surfaces verdicts with status colors (compliant = green, flagged = amber,
+rejected = red, needs_review = blue) and degrades gracefully when the API is
+unreachable, data is empty, or an upload/review fails.
+
 ## The expense review workflow
 
 The end-to-end flow is: **create a submission → upload receipts → run review →
@@ -490,9 +531,23 @@ See `.env.example` for all required variables and their descriptions.
 - `smoke_test_backend.py` end-to-end check
 - `/health`
 
+**Implemented (frontend)**
+
+- Reviewer dashboard (Next.js 14 App Router, TypeScript, Tailwind)
+- Submissions list with employee / status / date-range filters
+- New-submission form (loads employees, creates, navigates to detail)
+- Submission detail — employee/trip context, multi-file receipt upload
+  (PDF/TXT/JPG/PNG), **Run AI Review** with loading state
+- Receipt/verdict cards — merchant, date, amount, currency, category, raw-text
+  preview, AI verdict, reasoning, confidence, policy citations, quoted clauses,
+  color-coded by verdict
+- Human override modal (append-only) showing original vs. effective verdict and
+  override history
+- Policy semantic-search page (retrieval only)
+- Typed API client (`lib/api.ts`) with network / empty / upload / review error states
+
 **Not implemented yet**
 
-- **Frontend** — still the default Next.js landing page (no review UI)
 - **Auth** — endpoints are unauthenticated; RLS policies are open for local dev
 - **Async/background review** — review runs synchronously in the request
 - **Receipt re-extraction endpoint** — files saved without a key (e.g. images)
