@@ -1,555 +1,453 @@
 # Northwind Expense AI
 
-AI-powered expense review and approval platform built with Next.js 14, FastAPI, Supabase (Postgres + pgvector), and Claude.
+An AI-assisted corporate **travel-and-expense (T&E) review** system. Employees submit
+expense reports; the system extracts receipt data, retrieves the relevant company
+policy via RAG, and asks Claude for a **policy-grounded compliance verdict** that a
+human reviewer can inspect and override.
 
-## Tech stack
+Built as a case study. It runs end-to-end against a real database and the Claude +
+OpenAI APIs, with a deliberately scoped feature set — see
+[Known limitations](#19-known-limitations) for an honest account of what is and isn't
+built.
+
+> **Status at a glance:** backend + frontend run locally against hosted Supabase
+> Postgres. **Auth is not implemented**, **review runs synchronously**, **Supabase RLS
+> is relaxed for dev**, and **deployment is not included**. Details below.
+
+---
+
+## 1. Project overview
+
+Northwind Logistics processes expense reports that must be checked against a corpus of
+written travel policies (per-diems, class-of-service rules, meal caps, etc.). Doing
+this by hand is slow and inconsistent. This project automates the first pass:
+
+- **Receipts in** → fields extracted (text/PDF via `pypdf`, images via Claude vision).
+- **Policy retrieved** → the most relevant policy chunks are pulled from a pgvector
+  index using semantic search.
+- **Verdict out** → Claude returns a structured `compliant | flagged | rejected |
+  needs_review` decision, **citing only the retrieved policy text**, which the backend
+  validates before storing.
+- **Human in the loop** → reviewers override any verdict; overrides are append-only and
+  never mutate the AI's original decision.
+
+The emphasis is on **grounding and auditability** — every citation and quote is checked
+against the retrieved source text server-side, so the model cannot fabricate policy.
+
+## 2. Problem statement
+
+Manual expense review has three recurring problems this project targets:
+
+1. **Inconsistency** — different reviewers apply policy differently. A retrieval-grounded
+   model applies the same written rules every time.
+2. **Traceability** — approvals rarely record *which* policy clause justified a decision.
+   Here, every verdict stores its citations and verbatim quotes.
+3. **Throughput** — a first-pass triage (`compliant` vs. `needs a human`) lets reviewers
+   focus on the genuinely ambiguous cases.
+
+It is explicitly **decision-support, not auto-approval**: the AI verdict is advisory and
+always overridable.
+
+## 3. Key features
+
+- **Receipt extraction** for `.txt`, `.pdf` (pypdf), and `.jpg/.jpeg/.png` (Claude
+  vision), using schema-constrained tool calls so the output is always well-shaped JSON.
+- **RAG policy retrieval** over ingested policy PDFs with OpenAI embeddings + pgvector
+  (HNSW), including a soft relevance floor to suppress off-topic chunks.
+- **Policy-grounded AI review** — Claude returns a verdict, reasoning, confidence,
+  citations, and quotes; the backend **drops any citation/quote not present in the
+  retrieved chunks**.
+- **Append-only human overrides** with a full audit trail (`effective_verdict` = latest
+  override; the AI verdict is preserved).
+- **Submission status roll-up** from per-receipt verdicts
+  (`rejected > flagged > needs_review > compliant`).
+- **Reviewer dashboard** (Next.js) for submissions, uploads, running review, and
+  overrides.
+- **Operational tooling** — idempotent seed/ingest scripts and an end-to-end smoke test.
+
+## 4. Architecture
+
+```mermaid
+flowchart LR
+    subgraph Client
+        UI["Next.js 14 dashboard<br/>(browser)"]
+    end
+
+    subgraph Backend["FastAPI backend"]
+        API["REST API /api/v1"]
+        EXT["receipt_extractor"]
+        RET["retrieval service"]
+        REV["ai_reviewer"]
+    end
+
+    subgraph Data["Supabase Postgres 17 + pgvector"]
+        PG[("domain tables<br/>employees, submissions,<br/>receipts, verdicts, overrides")]
+        VEC[("policy_chunks<br/>HNSW vector index")]
+    end
+
+    subgraph External["External APIs"]
+        CLAUDE["Anthropic Claude<br/>(extraction + review)"]
+        OAI["OpenAI<br/>text-embedding-3-small"]
+    end
+
+    UI -->|"HTTP JSON"| API
+    API --> EXT
+    API --> REV
+    REV --> RET
+    EXT -->|"vision / field parse"| CLAUDE
+    RET -->|"embed query"| OAI
+    RET -->|"cosine kNN"| VEC
+    REV -->|"verdict (tool call)"| CLAUDE
+    API <--> PG
+    API <--> VEC
+
+    INGEST["ingest_policies.py"] -->|"embed chunks"| OAI
+    INGEST -->|"store vectors"| VEC
+    SEED["seed_employees.py"] --> PG
+```
+
+The browser talks to the backend directly over HTTP (no SSR data fetching). Embedding
+and review calls go out to OpenAI and Anthropic respectively; everything else is local
+to the backend and database.
+
+## 5. Tech stack
 
 | Layer | Technology |
 |-------|-----------|
-| Frontend | Next.js 14 (App Router), TypeScript, Tailwind CSS |
-| Backend | FastAPI, SQLAlchemy (async), Alembic |
-| Database | Supabase Postgres 16 + pgvector |
-| AI | Anthropic Claude API |
-| Auth | Supabase Auth + JWT |
-| Infra | Docker / docker-compose |
+| Frontend | Next.js 14 (App Router), React, TypeScript, Tailwind CSS |
+| Backend | FastAPI, SQLAlchemy 2.0 (async), Pydantic v2 / pydantic-settings, Uvicorn |
+| Database | PostgreSQL 17 (Supabase) + **pgvector 0.8** (HNSW index) |
+| AI — review/extraction | Anthropic Claude (`claude-sonnet-4-6`), schema-constrained tool use |
+| AI — embeddings | OpenAI `text-embedding-3-small` (1536-dim) |
+| PDF / tokenization | `pypdf`, `tiktoken` (`cl100k_base`) |
+| DB migrations | Raw SQL files in `supabase/migrations/` (applied via Supabase SQL Editor or `supabase db push`) |
+| Local orchestration | `docker-compose.yml` (provided; optional) |
+
+> Note: there is **no ORM migration tool** (no Alembic) — migrations are plain,
+> ordered SQL. The frontend includes scaffolded Supabase client helpers, but **they are
+> not wired into any page** (see limitations).
+
+## 6. Data flow
+
+`receipt upload → extraction → retrieval → Claude review → verdict → override`
+
+```mermaid
+sequenceDiagram
+    actor R as Reviewer
+    participant UI as Next.js UI
+    participant API as FastAPI
+    participant EX as receipt_extractor
+    participant RT as retrieval (pgvector)
+    participant CL as Claude
+    participant DB as Postgres
+
+    R->>UI: Upload receipt(s)
+    UI->>API: POST /submissions/{id}/receipts
+    API->>EX: extract(file)
+    EX->>CL: parse fields / vision (if key set)
+    EX-->>API: merchant, amount, date, category, raw text
+    API->>DB: insert receipts
+
+    R->>UI: Run AI Review
+    UI->>API: POST /submissions/{id}/review
+    loop each un-reviewed receipt
+        API->>RT: search(policy query)
+        RT->>RT: embed query + cosine kNN + relevance floor
+        RT-->>API: top-k policy chunks
+        API->>CL: review(receipt + context + chunks) [forced tool call]
+        CL-->>API: verdict + citations + quotes
+        API->>API: validate citations/quotes vs retrieved chunks
+        API->>DB: insert verdict
+    end
+    API-->>UI: verdicts + rolled-up status
+
+    R->>UI: Override (optional)
+    UI->>API: POST /verdicts/{id}/override
+    API->>DB: append override (AI verdict preserved)
+```
+
+**Grounding guardrails applied during review:**
+- Citations referencing a `document_id` **not** in the retrieved set are dropped.
+- Quotes that are not a verbatim (whitespace-normalized) substring of a retrieved chunk
+  are dropped.
+- If no policy chunks were retrieved, a confident `compliant`/`rejected` is downgraded to
+  `needs_review`.
+
+## 7. RAG design
+
+**Ingestion (`backend/ingest_policies.py`)** — one PDF at a time to bound memory:
+
+1. **Parse** each PDF page-by-page with `pypdf`; `document_id` = file stem
+   (`policy1.pdf` → `policy1`).
+2. **Chunk** per page into overlapping token windows (default **800 tokens, 150
+   overlap**) using `tiktoken` `cl100k_base` (falls back to whitespace splitting if
+   tiktoken can't load).
+3. **Section tagging** via a regex heading detector (`^N.N Heading`) carried forward
+   across chunks — a deliberate *placeholder*, not real layout parsing.
+4. **Embed** each chunk with OpenAI `text-embedding-3-small` (1536-dim), batched.
+5. **Store** in `policy_chunks` with a pgvector **HNSW** cosine index. Re-runs are safe
+   (document upserted; its chunks deleted and re-inserted).
+
+**Retrieval (`backend/app/services/retrieval.py`)**:
+
+- Embed the query with the **same** model used at ingest.
+- Rank `policy_chunks` by pgvector cosine distance, return `top_k`.
+- **Soft relevance floor:** keep chunks with similarity ≥ `MIN_SIMILARITY` (0.20), but
+  **always return at least `KEEP_AT_LEAST` (2)** — so filtering trims noise without ever
+  emptying the result purely because everything scored low.
+
+**Why HNSW (not IVFFlat):** the original IVFFlat index used `lists=100`, far too many for
+a ~100-chunk corpus. With the default `ivfflat.probes=1` a query scanned a single, often
+empty list and returned 0–2 rows regardless of `LIMIT` — surfacing as *"No policy chunks
+retrieved."* Reproduced directly: **14/20 probe queries returned zero rows** under
+IVFFlat vs **0/20** under HNSW. HNSW needs no `lists`/`probes` tuning and keeps recall
+stable across corpus sizes. See migration `005`.
+
+**Citation grounding** is the second half of RAG quality here: retrieval decides *what
+the model sees*, and the server-side validation above decides *what it's allowed to
+cite*. Together they keep verdicts traceable to real policy text.
+
+## 8. Database schema summary
+
+Defined in `supabase/migrations/003_northwind_schema.sql`; all tables in `public` with
+RLS enabled (open policies for dev). Seven active domain tables:
+
+| Table | Purpose | Key columns |
+|-------|---------|-------------|
+| `employees` | Org directory | `employee_id` (text natural key, e.g. `NW-04821`), `manager_id` (self-ref) |
+| `submissions` | One expense report / trip | `employee_id` →, `trip_purpose`, dates, `status` |
+| `receipts` | One file per receipt | `submission_id` →, `merchant`, `amount`, `category`, `raw_extracted_text` |
+| `verdicts` | Claude's decision (1:1 receipt) | `verdict`, `reasoning`, `confidence`, `policy_citations` (jsonb), `quoted_policy_clauses` (jsonb) |
+| `overrides` | Human corrections (N:1 verdict) | `override_verdict`, `reviewer_name`, append-only |
+| `policy_documents` | One row per policy PDF | `document_id` (stem), `filename`, `title` |
+| `policy_chunks` | RAG index | `document_id` →, `chunk_text`, `embedding vector(1536)` (HNSW), `metadata` jsonb |
+
+Design choices: `employee_id` is a **text business key** (matches HR data) rather than a
+UUID PK; `receipts.file_path` is **relative** to the project root; `verdicts` are
+**append-only** with human corrections isolated in `overrides`.
+
+> Migration `002_initial_schema.sql` creates an earlier skeleton (`users`, `expenses`,
+> `expense_reviews`) that the current app **does not use**. It is retained for history;
+> the live schema is `003`+.
+
+## 9. API endpoints summary
+
+Base prefix `/api/v1` (interactive docs at `/api/v1/docs`).
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Liveness check (no DB) |
+| GET | `/api/v1/employees` | List employees (`?department=`) |
+| GET | `/api/v1/employees/{employee_id}` | Fetch one employee |
+| POST | `/api/v1/policy/search` | Semantic policy search (retrieval only, no LLM) |
+| POST | `/api/v1/submissions` | Create a submission |
+| GET | `/api/v1/submissions` | List submissions (`?employee_id=&status=&date_from=&date_to=`) |
+| GET | `/api/v1/submissions/{id}` | Submission detail (receipts, verdicts, overrides) |
+| POST | `/api/v1/submissions/{id}/receipts` | Upload one or more receipts (multipart) |
+| GET | `/api/v1/submissions/{id}/receipts` | List receipts |
+| POST | `/api/v1/submissions/{id}/review` | Run AI review over un-reviewed receipts |
+| GET | `/api/v1/receipts/{id}/verdict` | Fetch verdict + override trail |
+| POST | `/api/v1/verdicts/{id}/override` | Append a human override |
+
+## 10. Local setup
+
+**Prerequisites:** Python 3.12+, Node.js 20+, and a Postgres database with `pgvector`
+(a hosted Supabase project is the path used here; the included `docker-compose.yml` is an
+alternative for a fully local stack).
+
+```bash
+# clone, then:
+cd backend
+python -m venv .venv
+# Windows: .venv\Scripts\activate    macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+
+cd ../frontend
+npm install
+```
+
+Then create the env files (§11), apply migrations (§12), seed (§13), ingest (§14), and
+run the backend (§15) and frontend (§16).
+
+## 11. Environment variables
+
+Two `.env` files are needed because the **app** and the **scripts** load config
+differently:
+
+- `backend/.env` — read by the FastAPI app (when run from `backend/`).
+- project-root `.env` — read by `seed_employees.py` / `ingest_policies.py`
+  (`load_dotenv(PROJECT_ROOT/.env)`).
+
+Keep them in sync. Both are gitignored. Copy `.env.example` as a starting point.
+
+| Variable | Used by | Notes |
+|----------|---------|-------|
+| `DATABASE_URL` | app + scripts | **Must** use `postgresql+asyncpg://…`. For Supabase, use the **Session pooler** host (IPv4-friendly, works with asyncpg); the scripts strip the `+asyncpg` prefix themselves. URL-encode reserved characters in the password (`%` → `%25`, `@` → `%40`). |
+| `ANTHROPIC_API_KEY` | extraction + review | App boots without it; review returns `503`, image extraction errors, text/PDF fields are left null. |
+| `ANTHROPIC_MODEL` | review/extraction | Default `claude-sonnet-4-6`. |
+| `ANTHROPIC_MAX_TOKENS` | review/extraction | Default `1500`. |
+| `OPENAI_API_KEY` | ingestion + retrieval | Embeds queries and chunks. Without it, review proceeds with no policy context (→ `needs_review`). |
+| `EMBEDDING_MODEL` | ingestion + retrieval | Default `text-embedding-3-small` (1536-dim — must match the schema). |
+| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | (reserved) | Present in config; not required for the current REST flow. |
+| `ENVIRONMENT` | app | `development` enables SQL echo. |
+| `ALLOWED_ORIGINS` | app | CORS; defaults to `http://localhost:3000`. |
+
+Frontend (`frontend/.env.local`):
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:8000/api/v1` | Backend base URL **including** `/api/v1`. Called from the browser, so must be reachable and CORS-allowed. |
+| `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` | — | Only needed if Supabase Auth is wired up later; **unused at runtime today**. |
+
+## 12. Applying migrations
+
+Apply the five migrations **in numeric order**: `001 → 002 → 003 → 004 → 005`.
+(`001` enables extensions including `vector`; `005` swaps the policy index to HNSW.)
+
+**Option A — Supabase SQL Editor:** paste each file's contents and run, in order.
+
+**Option B — Supabase CLI (remote):**
+```bash
+npx supabase link --project-ref <your-project-ref>
+npx supabase db push   # applies supabase/migrations/* in order
+```
+
+Verify the seven active tables exist:
+```sql
+select table_name from information_schema.tables
+where table_schema='public'
+  and table_name in ('employees','submissions','receipts','verdicts',
+                     'overrides','policy_documents','policy_chunks')
+order by table_name;
+```
+
+## 13. Seeding employees
+
+From `backend/` (reads the project-root `.env`):
+```bash
+python seed_employees.py            # --dry-run to preview, --verbose for per-row logs
+```
+Seeds the 5 sample employees from `submissions/*/employee_info.json`. Idempotent
+(`ON CONFLICT DO NOTHING`). Managers not present in the sample data are left as `NULL`
+`manager_id` (expected). **Expected: 5 employees.**
+
+## 14. Ingesting policies
+
+```bash
+python ingest_policies.py           # --dry-run parses/chunks with no API or DB calls
+```
+Parses the 8 PDFs in `policies/`, chunks, embeds with OpenAI, and stores vectors.
+Requires `OPENAI_API_KEY`. **Expected: 8 documents, 105 chunks** (with the default
+chunk size/overlap).
+
+## 15. Running the backend
+
+```bash
+cd backend
+uvicorn app.main:app --reload --port 8000
+```
+- Docs: <http://localhost:8000/api/v1/docs>
+- Health: <http://localhost:8000/health>
+
+## 16. Running the frontend
+
+```bash
+cd frontend
+cp .env.local.example .env.local    # adjust if backend isn't on :8000
+npm run dev
+```
+- App: <http://localhost:3000> (requires the backend running and CORS-allowed).
+- Pages: `/` (dashboard), `/submissions/new`, `/submissions/[id]`, `/policy`.
+- `npm run build` / `npm run type-check` for a production build / TS check.
+
+## 17. Running the smoke test
+
+With the backend running and employees seeded:
+```bash
+cd backend
+python smoke_test_backend.py --base-url http://localhost:8000
+```
+Exercises the full path: `/health` → list employees → create submission → upload a TXT
+receipt → run review → fetch verdict → override. Steps whose dependencies aren't
+configured are reported `SKIP` (not `FAIL`), so it's useful on a partially-configured
+machine. A fully-configured run reports **7 passed, 0 failed**.
+
+## 18. Evaluation approach and metrics
+
+This is a case study, so evaluation is **operational and reproducible**, not a formal
+accuracy benchmark. There is **no labeled gold-verdict dataset**; the system is not
+claimed to be accurate against a ground truth.
+
+What *is* measured:
+
+- **End-to-end smoke test** (`smoke_test_backend.py`) — 7-step happy path; current run:
+  **7/7 pass**, producing a grounded verdict with citations + verbatim quotes.
+- **Retrieval reliability** — a 20+ query probe over the corpus measuring:
+  - *retrieval count* (rows returned vs. requested `top_k`),
+  - *similarity scores* (cosine, per result),
+  - *zero-result rate*.
+  Result of the index fix: **zero-result queries dropped from 14/20 (IVFFlat) to 0/20
+  (HNSW)**; the soft floor returns ≥2 chunks even for off-topic/gibberish queries.
+- **Grounding checks** — citations/quotes are validated against retrieved text on every
+  review; ungrounded ones are dropped (a faithfulness guard rather than a metric).
+
+Observed similarity is modest (top matches ~0.30–0.64) for `text-embedding-3-small` on
+short queries against policy prose; the confidence thresholds are heuristics, not
+calibrated.
+
+## 19. Known limitations
+
+Stated plainly for reviewers:
+
+- **No authentication / authorization.** All endpoints are open. The frontend's Supabase
+  client helpers are scaffolded but **not used by any page**. The `users.role` enum
+  exists in the legacy schema but no role checks are enforced.
+- **Review is synchronous.** Each receipt is reviewed with sequential, in-request Claude
+  calls; a large submission blocks the HTTP request for the duration. No queue/background
+  worker.
+- **Supabase RLS is relaxed for dev.** Row-Level Security is enabled but the policies are
+  `USING (true)` — effectively open. **Not production-safe.**
+- **No deployment configured.** A `docker-compose.yml` exists for local use; there is no
+  hosting/CI/CD setup unless added later.
+- **Retrieval quality is corpus-tuned, not tuned for accuracy.** Section detection is a
+  regex placeholder; chunking is fixed-size; similarity thresholds are heuristic; no
+  reranking or hybrid (keyword + vector) search.
+- **No labeled evaluation set.** Correctness of verdicts is not benchmarked.
+- **Minimal automated tests.** Only the smoke script and ad-hoc retrieval probes — no
+  `pytest` suite, no CI.
+- **Re-extraction gap.** A file saved without an API key (e.g. an image) must be
+  re-uploaded once the key is set; there's no re-extract endpoint.
+- **Single-currency assumption.** Amounts default to USD; no FX normalization.
+
+## 20. Future improvements
+
+- **Authentication & RBAC** — Supabase Auth (or JWT) with the `employee/manager/finance/
+  admin` roles, and tightened per-role RLS policies.
+- **Asynchronous review** — move review to a background worker/queue with status polling
+  or websockets; add Anthropic prompt caching to cut cost/latency.
+- **Evaluation harness** — a labeled set of receipts→expected-verdicts; report retrieval
+  recall@k / precision, verdict agreement, and citation faithfulness.
+- **Better retrieval** — real heading/layout-aware chunking, hybrid search + reranking,
+  and per-policy filtering.
+- **Re-extraction endpoint** and richer receipt parsing (multi-currency, line items).
+- **Deployment** — containerized backend + managed Postgres, CI/CD, observability.
+
+---
 
 ## Project structure
 
 ```
 northwind-expense-ai/
-├── frontend/                  # Next.js 14 app
-│   ├── src/
-│   │   ├── app/               # App Router pages & layouts
-│   │   ├── components/        # Reusable UI components
-│   │   ├── lib/
-│   │   │   ├── api.ts         # Typed fetch wrapper for FastAPI
-│   │   │   └── supabase/      # Browser & server Supabase clients
-│   │   └── types/             # Shared TypeScript types
-│   ├── Dockerfile
-│   └── package.json
-│
-├── backend/                   # FastAPI service
-│   ├── app/
-│   │   ├── api/v1/routes/     # per-resource route files
-│   │   ├── core/              # config.py, database.py
-│   │   ├── models/            # SQLAlchemy ORM models (7 domain tables)
-│   │   ├── schemas/           # Pydantic request/response schemas
-│   │   ├── services/          # ai_reviewer.py, receipt_extractor.py, retrieval.py, anthropic_client.py
-│   │   └── main.py
-│   ├── tests/
-│   └── requirements.txt
-│
-├── policies/                  # Source policy PDFs (policy1.pdf … policy8.pdf)
-├── submissions/               # Sample expense submissions
-│   └── NN_<name>/
-│       ├── employee_info.json
-│       └── receipts/          # Receipt PDFs for that trip
-│
-├── supabase/
-│   ├── config.toml
-│   └── migrations/
-│       ├── 001_enable_extensions.sql   # uuid-ossp, pgcrypto, vector
-│       ├── 002_initial_schema.sql      # skeleton tables (superseded)
-│       ├── 003_northwind_schema.sql    # production domain schema
-│       └── 004_review_vocabulary.sql   # verdict/status check constraints
-│
-├── Dockerfile                 # Backend production image
-├── docker-compose.yml         # Full local stack
+├── frontend/                 # Next.js 14 app (App Router, TS, Tailwind)
+│   └── src/{app,components,lib,types}
+├── backend/                  # FastAPI service
+│   ├── app/{api,core,models,schemas,services,main.py}
+│   ├── seed_employees.py     # employee seeding (idempotent)
+│   ├── ingest_policies.py    # policy PDF → chunks → embeddings → pgvector
+│   └── smoke_test_backend.py # end-to-end HTTP smoke test
+├── policies/                 # policy1.pdf … policy8.pdf
+├── submissions/              # sample expense reports (employee_info.json + receipts/)
+├── supabase/migrations/      # 001 … 005 (ordered SQL)
+├── docker-compose.yml        # optional local stack
 └── .env.example
 ```
-
-## Local development
-
-### Prerequisites
-- Docker Desktop
-- Node.js 20+
-- Python 3.12+
-- Supabase CLI (`npm install -g supabase`)
-
-### 1. Environment variables
-
-```bash
-cp .env.example .env
-# Fill in ANTHROPIC_API_KEY and Supabase credentials
-```
-
-### 2. Start the full stack with Docker
-
-```bash
-docker compose up --build
-```
-
-Services:
-- Frontend → http://localhost:3000
-- Backend API → http://localhost:8000
-- API docs → http://localhost:8000/api/v1/docs
-- Postgres → localhost:54322
-
-### 3. Run database migrations
-
-```bash
-supabase db push
-# or manually:
-psql postgresql://postgres:password@localhost:54322/postgres \
-  -f supabase/migrations/001_enable_extensions.sql \
-  -f supabase/migrations/002_initial_schema.sql \
-  -f supabase/migrations/003_northwind_schema.sql
-```
-
-### 4. Seed employees
-
-After the database is running and migrations have been applied, seed the five
-sample employees from the `submissions/` folder:
-
-```bash
-cd backend
-python seed_employees.py
-```
-
-Expected output:
-
-```
-2025-06-01 12:00:00 [INFO] Scanning submissions at: .../submissions
-2025-06-01 12:00:00 [INFO] Found 5 unique employee record(s) across 5 submission folder(s)
-2025-06-01 12:00:00 [INFO] Connecting to database…
-2025-06-01 12:00:00 [INFO] Seeding complete — inserted: 5 | already existed: 0 | manager links resolved: 0
-2025-06-01 12:00:00 [INFO] 5 manager_id reference(s) left as NULL (those managers are not in
-                           the submissions data — populate from HR export).
-```
-
-**Flags**
-
-| Flag | Effect |
-|------|--------|
-| `--dry-run` | Print what would be inserted; no DB writes |
-| `--verbose` | Show a DEBUG line for every row |
-
-**Re-running is safe** — the script uses `ON CONFLICT (employee_id) DO NOTHING` so
-existing rows are never duplicated or overwritten.
-
-**Manager IDs** — each employee references a manager (`NW-03012`, `NW-01104`, etc.)
-who is not present in the sample submissions. Those `manager_id` columns are left
-`NULL` on first seed. Populate them by loading a full HR employee export or by
-running the seed script again after those managers are inserted.
-
-**Verify via API** — once the backend is running:
-
-```bash
-# list all seeded employees
-curl http://localhost:8000/api/v1/employees
-
-# filter by department
-curl "http://localhost:8000/api/v1/employees?department=Logistics%20Ops"
-
-# fetch a single employee by business key
-curl http://localhost:8000/api/v1/employees/NW-04821
-```
-
-### 5. Ingest policy documents
-
-Parse the policy PDFs in `policies/`, chunk them, embed each chunk with OpenAI
-`text-embedding-3-small`, and store the vectors in `policy_chunks`:
-
-```bash
-cd backend
-python ingest_policies.py
-```
-
-Requires `OPENAI_API_KEY` in the project-root `.env`. The pipeline processes
-**one PDF at a time** (bounded memory): extract text page-by-page → split into
-overlapping token windows → detect a section heading → embed → store.
-
-Expected output:
-
-```
-2025-06-01 12:00:00 [INFO] Found 8 PDF(s) in .../policies
-2025-06-01 12:00:00 [INFO] Tokenizer: tiktoken cl100k_base
-2025-06-01 12:00:00 [INFO] Processing policy1.pdf (document_id=policy1)
-2025-06-01 12:00:00 [INFO]   14 page(s) → 18 chunk(s)
-2025-06-01 12:00:00 [INFO]   embedded 18, stored 18 chunk(s)
-...
-2025-06-01 12:00:05 [INFO] Ingestion complete — PDFs processed: 8 | chunks created: 142 | embeddings stored: 142
-```
-
-(Chunk counts above are illustrative.)
-
-**Flags**
-
-| Flag | Effect |
-|------|--------|
-| `--dry-run` | Parse + chunk only; **no** OpenAI calls, **no** DB writes. Good for a cost-free check. |
-| `--verbose` | Print a DEBUG line per chunk (page, index, detected section, token count) |
-| `--chunk-size N` | Tokens per chunk (default **800**) |
-| `--overlap N` | Token overlap between consecutive chunks (default **150**) |
-
-**Design notes**
-
-- **`document_id`** is the file stem (`policy1.pdf` → `policy1`), matching the
-  `policy_documents` / `policy_chunks` schema. The pipeline is generic and makes
-  no assumptions about a document's internal structure.
-- **Chunking is per page**, so every chunk maps to exactly one `page_number`.
-  Overlap is applied within a page.
-- **Section detection is a regex placeholder** (`^N.N Heading`). The most recent
-  heading is carried forward to chunks that don't start with one. A production
-  version would parse real heading styles.
-- **Re-running is safe** — `policy_documents` is upserted on `document_id`, and a
-  document's existing `policy_chunks` are deleted and re-inserted each run.
-- If `tiktoken` can't load its encoding (e.g. fully offline), the pipeline falls
-  back to a whitespace token approximation and logs a warning.
-
-## Policy search (retrieval)
-
-Once policies are ingested, you can run semantic search over them. This is
-**pure embedding retrieval — no LLM is called**. The query is embedded with the
-same `text-embedding-3-small` model used at ingest, then ranked against
-`policy_chunks` by pgvector cosine similarity.
-
-**Endpoint:** `POST /api/v1/policy/search`
-
-```bash
-curl -X POST http://localhost:8000/api/v1/policy/search \
-  -H "Content-Type: application/json" \
-  -d '{"query": "Can directors fly business class?"}'
-```
-
-Request:
-
-```json
-{ "query": "Can directors fly business class?", "top_k": 5 }
-```
-
-`top_k` is optional (default **5**, max 20).
-
-Response:
-
-```json
-{
-  "query": "Can directors fly business class?",
-  "confidence": "high",
-  "results": [
-    {
-      "document_id": "policy2",
-      "page_number": 1,
-      "section": "2 Class of service",
-      "chunk_text": "Business class is permitted only on international flight segments ...",
-      "similarity": 0.61,
-      "confidence": "high"
-    }
-  ]
-}
-```
-
-**Confidence** is derived from cosine similarity (heuristics tuned for
-`text-embedding-3-small`, see `services/retrieval.py`):
-
-| Similarity | Confidence |
-|------------|------------|
-| ≥ 0.50 | `high` |
-| 0.35 – 0.50 | `medium` |
-| < 0.35 | `low` |
-
-The top-level `confidence` reflects the best-matching chunk; each result also
-carries its own per-chunk confidence. Requires `OPENAI_API_KEY` (returns `503`
-if unset).
-
-### 6. Run the backend (without Docker)
-
-```bash
-cd backend
-python -m venv .venv
-# Windows:  .venv\Scripts\activate     macOS/Linux:  source .venv/bin/activate
-pip install -r requirements.txt
-
-# DATABASE_URL must use the asyncpg driver, e.g.
-#   postgresql+asyncpg://postgres:password@localhost:54322/postgres
-uvicorn app.main:app --reload --port 8000
-```
-
-- API docs: http://localhost:8000/api/v1/docs
-- Health:   http://localhost:8000/health
-
-**Required environment variables** (read from the project-root `.env`):
-
-| Variable | Required for | Notes |
-|----------|--------------|-------|
-| `DATABASE_URL` | everything | Must use `postgresql+asyncpg://…` |
-| `ANTHROPIC_API_KEY` | review + image/field extraction | Optional to boot; review returns `503` without it |
-| `OPENAI_API_KEY` | policy retrieval during review | Embeds the query for RAG; review still runs without it but returns `needs_review` for lack of context |
-| `ANTHROPIC_MODEL` | optional | Defaults to `claude-sonnet-4-6` |
-
-> Apply migrations through `004_review_vocabulary.sql` before reviewing — it
-> aligns the verdict/status check constraints with the compliance vocabulary
-> (`compliant | flagged | rejected | needs_review`).
-
-### 7. Run the frontend (review UI)
-
-The Next.js app is a business-facing reviewer dashboard. It talks to the backend
-entirely from the browser, so the backend must be running and reachable.
-
-```bash
-cd frontend
-npm install
-cp .env.local.example .env.local   # then adjust if your backend isn't on :8000
-npm run dev
-```
-
-- Frontend: http://localhost:3000
-- Requires the backend at the URL set by `NEXT_PUBLIC_API_BASE_URL`.
-
-**Frontend environment variable**
-
-| Variable | Default | Notes |
-|----------|---------|-------|
-| `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:8000/api/v1` | Backend base URL **including** the `/api/v1` prefix. The browser calls this directly, so it must be reachable from the user's machine and allowed by the backend's CORS `ALLOWED_ORIGINS` (defaults to `http://localhost:3000`). |
-
-**Build / type-check**
-
-```bash
-npm run build        # production build
-npm run type-check   # tsc --noEmit, no TypeScript errors
-```
-
-**Pages**
-
-| Route | Purpose |
-|-------|---------|
-| `/` | Dashboard — submissions table with employee/status/date filters |
-| `/submissions/new` | Create a submission for an employee |
-| `/submissions/[id]` | Submission detail — employee context, receipt upload, **Run AI Review**, receipt/verdict cards, override |
-| `/policy` | Policy semantic search (retrieval only) |
-
-The UI surfaces verdicts with status colors (compliant = green, flagged = amber,
-rejected = red, needs_review = blue) and degrades gracefully when the API is
-unreachable, data is empty, or an upload/review fails.
-
-## The expense review workflow
-
-The end-to-end flow is: **create a submission → upload receipts → run review →
-inspect verdicts → (optionally) override**.
-
-### Create a submission
-
-```bash
-curl -X POST http://localhost:8000/api/v1/submissions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "employee_id": "NW-04821",
-    "trip_purpose": "Quarterly client review in Denver",
-    "trip_start_date": "2025-04-14",
-    "trip_end_date": "2025-04-16"
-  }'
-# -> 201 { "id": "<submission_id>", "status": "pending", ... }
-```
-
-### Upload receipts
-
-Accepts one or many files in a single multipart request. Supported types:
-`.txt`, `.pdf`, `.jpg`, `.jpeg`, `.png`. Files are saved under
-`backend/uploads/{submission_id}/` and the text/fields are extracted
-immediately (PDF via `pypdf`, images via Claude vision, fields parsed by Claude
-when `ANTHROPIC_API_KEY` is set).
-
-```bash
-curl -X POST http://localhost:8000/api/v1/submissions/<submission_id>/receipts \
-  -F "files=@submissions/01_clean_denver/receipts/01_united_airlines.pdf" \
-  -F "files=@submissions/01_clean_denver/receipts/04_dinner_mercantile.pdf"
-# -> 201 { "submission_id": "...", "receipts": [ ... ], "warnings": [ ... ] }
-```
-
-Extraction is best-effort: a file that can't be parsed (e.g. an image uploaded
-without an API key) is still saved and recorded, and the reason appears in
-`warnings`.
-
-```bash
-# list receipts for a submission
-curl http://localhost:8000/api/v1/submissions/<submission_id>/receipts
-```
-
-### Run the AI review
-
-Reviews every receipt that doesn't yet have a verdict. For each receipt Claude
-is given the employee + trip context, the receipt fields/text, and the top
-policy chunks retrieved by pgvector, and returns a schema-constrained verdict.
-Quotes and citations are validated against the retrieved chunks server-side, so
-nothing is fabricated.
-
-```bash
-curl -X POST http://localhost:8000/api/v1/submissions/<submission_id>/review
-```
-
-```json
-{
-  "submission_id": "...",
-  "status": "flagged",
-  "reviewed": 2,
-  "verdicts": [
-    {
-      "id": "...",
-      "receipt_id": "...",
-      "verdict": "flagged",
-      "category": "meal",
-      "reasoning": "Dinner exceeds the per-person meal cap...",
-      "confidence": 0.82,
-      "policy_citations": [
-        {"document_id": "policy3", "page_number": 2, "section": "4.2", "reason": "Meal cap"}
-      ],
-      "quoted_policy_clauses": [
-        {"document_id": "policy3", "quote": "Meals shall not exceed $75 per person per day"}
-      ],
-      "overrides": [],
-      "effective_verdict": "flagged"
-    }
-  ]
-}
-```
-
-The submission `status` is rolled up from the receipt verdicts using the
-precedence **rejected > flagged > needs_review > compliant** (review returns
-`503` if `ANTHROPIC_API_KEY` is missing).
-
-### Inspect and override a verdict
-
-Verdicts are append-only. A human override never mutates the AI verdict — it is
-added to an audit trail and the **latest override wins** as `effective_verdict`.
-
-```bash
-# fetch the verdict (with override trail) for a receipt
-curl http://localhost:8000/api/v1/receipts/<receipt_id>/verdict
-
-# override a verdict
-curl -X POST http://localhost:8000/api/v1/verdicts/<verdict_id>/override \
-  -H "Content-Type: application/json" \
-  -d '{
-    "override_verdict": "compliant",
-    "reviewer_name": "Jordan Lee",
-    "comment": "Pre-approved by finance for the client dinner."
-  }'
-```
-
-### Smoke test
-
-With the backend running and an employee seeded, exercise the whole path:
-
-```bash
-cd backend
-python smoke_test_backend.py --base-url http://localhost:8000
-```
-
-It checks `/health`, lists employees, creates a submission, uploads a TXT
-receipt, runs the review, and applies an override — reporting `PASS`/`FAIL`/`SKIP`
-per step (steps needing a key/DB that isn't configured are skipped, not failed).
-
-## Database schema
-
-Migration `003_northwind_schema.sql` defines the full domain model. All tables live in the `public` schema with RLS enabled.
-
-```
-employees
-├── employee_id  TEXT UNIQUE       — natural key, e.g. "NW-04821"
-├── name / grade / title / department / home_base
-└── manager_id   TEXT → employees(employee_id)   — self-referencing org tree
-
-submissions
-├── employee_id  → employees(employee_id)
-├── folder_name  TEXT              — matches the /submissions sub-directory name
-├── trip_purpose / trip_start_date / trip_end_date
-└── status       TEXT              — pending | under_review | compliant | flagged | rejected | needs_review
-
-receipts
-├── submission_id → submissions(id)
-├── original_filename / file_path (relative from project root)
-├── merchant / transaction_date / amount / currency
-├── category     TEXT              — flight | hotel | transport | meal | registration | other
-└── raw_extracted_text             — full Claude/OCR output for audit trail
-
-verdicts  (1-to-1 with receipts, written by Claude)
-├── receipt_id  → receipts(id)
-├── verdict     TEXT              — compliant | flagged | rejected | needs_review
-├── reasoning / confidence (0.000–1.000)
-├── policy_citations   JSONB[]    — [{document_id, page_number, section, reason}]
-└── quoted_policy_clauses JSONB[] — [{document_id, quote}] — verbatim excerpts from retrieved chunks
-
-overrides  (many-to-1 with verdicts, written by human reviewers)
-├── verdict_id → verdicts(id)
-├── override_verdict / reviewer_name / comment
-└── created_at                    — append-only audit log; latest row wins
-
-policy_documents
-├── document_id TEXT UNIQUE       — "policy1" … "policy8" (stem of filename)
-└── filename / title
-
-policy_chunks  (RAG index over policy PDFs)
-├── document_id → policy_documents(document_id)
-├── section / page_number / chunk_text
-├── embedding   vector(1536)      — IVFFlat cosine index (lists=100)
-└── metadata    JSONB             — chunking provenance (offsets, headings)
-```
-
-### Key design decisions
-
-- **`employee_id` is a text natural key** (`NW-XXXXX`) rather than a UUID — it is the canonical identifier used in every `employee_info.json` and by the HR system.
-- **`receipts.file_path` is relative** to the project root so the path survives container re-mounts without absolute-path coupling.
-- **`verdicts` are append-only** per receipt (unique constraint on `receipt_id`). Human corrections go into `overrides` rather than mutating the original AI verdict, preserving the full audit trail.
-- **`policy_chunks.embedding`** uses an IVFFlat index with `lists=100`, appropriate for up to ~1 million vectors. Switch to HNSW (`vector_hnsw_ops`) for higher recall at scale.
-
-## Key API endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Liveness check (no DB) |
-| GET | `/api/v1/employees` | List employees (optional `?department=`) |
-| GET | `/api/v1/employees/{employee_id}` | Fetch one employee by business key |
-| POST | `/api/v1/policy/search` | Semantic search over policy chunks (embedding retrieval, no LLM) |
-| POST | `/api/v1/submissions` | Create a submission |
-| GET | `/api/v1/submissions` | List submissions (`?employee_id=`, `?status=`, `?date_from=`, `?date_to=`) |
-| GET | `/api/v1/submissions/{id}` | Submission detail with receipts, verdicts, overrides |
-| POST | `/api/v1/submissions/{id}/receipts` | Upload one or more receipt files (multipart) |
-| GET | `/api/v1/submissions/{id}/receipts` | List receipts for a submission |
-| POST | `/api/v1/submissions/{id}/review` | Run AI review for all not-yet-reviewed receipts |
-| GET | `/api/v1/receipts/{id}/verdict` | Fetch AI verdict (+ override trail) for a receipt |
-| POST | `/api/v1/verdicts/{id}/override` | Human override of a verdict (append-only) |
-
-## Environment variables reference
-
-See `.env.example` for all required variables and their descriptions.
-
-## Implemented vs. not implemented
-
-**Implemented (backend)**
-
-- Database schema + SQLAlchemy models for the full Northwind domain
-- Employee seeding (`seed_employees.py`) and employee API
-- Policy ingestion (`ingest_policies.py`) and semantic policy search (`POST /policy/search`)
-- Receipt text/field extraction (`services/receipt_extractor.py`) — `.txt`, `.pdf` (pypdf),
-  and `.jpg/.jpeg/.png` (Claude vision), with schema-constrained JSON
-- Submissions API — create, list (filterable), and detail (with receipts/verdicts/overrides)
-- Receipts API — multipart upload (saved to `backend/uploads/`) + list
-- AI review engine (`services/ai_reviewer.py`) — per-receipt, retrieval-grounded,
-  schema-constrained verdicts with server-side citation/quote validation
-- Review API (`POST /submissions/{id}/review`) + submission status roll-up
-- Verdict fetch and append-only human overrides (`effective_verdict` = latest override)
-- `smoke_test_backend.py` end-to-end check
-- `/health`
-
-**Implemented (frontend)**
-
-- Reviewer dashboard (Next.js 14 App Router, TypeScript, Tailwind)
-- Submissions list with employee / status / date-range filters
-- New-submission form (loads employees, creates, navigates to detail)
-- Submission detail — employee/trip context, multi-file receipt upload
-  (PDF/TXT/JPG/PNG), **Run AI Review** with loading state
-- Receipt/verdict cards — merchant, date, amount, currency, category, raw-text
-  preview, AI verdict, reasoning, confidence, policy citations, quoted clauses,
-  color-coded by verdict
-- Human override modal (append-only) showing original vs. effective verdict and
-  override history
-- Policy semantic-search page (retrieval only)
-- Typed API client (`lib/api.ts`) with network / empty / upload / review error states
-
-**Not implemented yet**
-
-- **Auth** — endpoints are unauthenticated; RLS policies are open for local dev
-- **Async/background review** — review runs synchronously in the request
-- **Receipt re-extraction endpoint** — files saved without a key (e.g. images)
-  must currently be re-uploaded once `ANTHROPIC_API_KEY` is set
-- **Automated test suite** — only the smoke script exists (no `pytest` cases yet)
