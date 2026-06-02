@@ -1,0 +1,6 @@
+{
+  "rewrites": [
+    { "source": "/submissions/new", "destination": "/submissions/new.html" },
+    { "source": "/submissions/:id", "destination": "/submissions/_.html" }
+  ]
+}
