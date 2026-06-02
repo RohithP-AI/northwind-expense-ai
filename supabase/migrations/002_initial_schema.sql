@@ -32,8 +32,7 @@ create table if not exists public.expenses (
 create index on public.expenses (submitted_by);
 create index on public.expenses (status);
 create index on public.expenses (expense_date desc);
-create index on public.expenses using ivfflat (embedding vector_cosine_ops)
-    with (lists = 100);
+create index on public.expenses using hnsw (embedding vector_cosine_ops);
 
 -- ─── Expense Reviews ──────────────────────────────────────────────────────────
 create table if not exists public.expense_reviews (

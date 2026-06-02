@@ -25,6 +25,15 @@ from app.models.policy import PolicyChunk
 HIGH_SIMILARITY = 0.50
 MEDIUM_SIMILARITY = 0.35
 
+# ── Relevance floor ───────────────────────────────────────────────────────────
+# Drop clearly off-topic chunks so the reviewer isn't fed (and tempted to cite)
+# irrelevant policy text. This is a soft floor: we never return empty purely
+# because of filtering — if fewer than KEEP_AT_LEAST chunks clear the bar, we
+# fall back to the KEEP_AT_LEAST best matches so a weak-but-best result can still
+# ground a decision.
+MIN_SIMILARITY = 0.20
+KEEP_AT_LEAST = 2
+
 
 def similarity_to_confidence(similarity: float) -> str:
     if similarity >= HIGH_SIMILARITY:
@@ -105,7 +114,15 @@ class RetrievalService:
                     confidence=similarity_to_confidence(similarity),
                 )
             )
-        return results
+
+        # Apply the relevance floor *after* retrieval. `results` is already
+        # ordered best-first, so results[:KEEP_AT_LEAST] is the top fallback.
+        # Filtering can shrink the list but, by construction, never empties it
+        # when any chunks were retrieved.
+        filtered = [r for r in results if r.similarity >= MIN_SIMILARITY]
+        if len(filtered) >= KEEP_AT_LEAST:
+            return filtered
+        return results[:KEEP_AT_LEAST]
 
 
 # Module-level singleton — the OpenAI client inside is created on first use.

@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, SmallInteger, String, Text, text
+from sqlalchemy import DateTime, ForeignKey, SmallInteger, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -37,6 +37,7 @@ class PolicyChunk(Base):
     )
     document_id: Mapped[str] = mapped_column(
         String(50),
+        ForeignKey("policy_documents.document_id", onupdate="CASCADE", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )

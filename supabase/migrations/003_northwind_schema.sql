@@ -175,11 +175,11 @@ create table if not exists public.policy_chunks (
 );
 
 create index on public.policy_chunks (document_id);
--- IVFFlat index for fast approximate cosine similarity search.
--- lists=100 is appropriate for up to ~1 million vectors.
+-- HNSW index for cosine similarity search. HNSW needs no lists/probes tuning
+-- and keeps high recall across corpus sizes (an IVFFlat index with a large
+-- `lists` value silently drops results on a small corpus). See migration 005.
 create index on public.policy_chunks
-    using ivfflat (embedding vector_cosine_ops)
-    with (lists = 100);
+    using hnsw (embedding vector_cosine_ops);
 
 
 -- ─── updated_at trigger (reuse function from 002 if present) ─────────────────
