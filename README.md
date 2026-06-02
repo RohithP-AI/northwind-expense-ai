@@ -407,8 +407,10 @@ Stated plainly for reviewers:
   worker.
 - **Supabase RLS is relaxed for dev.** Row-Level Security is enabled but the policies are
   `USING (true)` — effectively open. **Not production-safe.**
-- **No deployment configured.** A `docker-compose.yml` exists for local use; there is no
-  hosting/CI/CD setup unless added later.
+- **Partial deployment story.** The frontend is configured for static export (see
+  [Deployment](#deployment)), but the **backend is not hosted** — no managed Postgres,
+  CI/CD, or backend deploy is set up. A static frontend alone is non-functional without a
+  reachable API.
 - **Retrieval quality is corpus-tuned, not tuned for accuracy.** Section detection is a
   regex placeholder; chunking is fixed-size; similarity thresholds are heuristic; no
   reranking or hybrid (keyword + vector) search.
@@ -430,7 +432,43 @@ Stated plainly for reviewers:
 - **Better retrieval** — real heading/layout-aware chunking, hybrid search + reranking,
   and per-policy filtering.
 - **Re-extraction endpoint** and richer receipt parsing (multi-currency, line items).
-- **Deployment** — containerized backend + managed Postgres, CI/CD, observability.
+- **Full deployment** — host the backend (containerized) + managed Postgres, CI/CD,
+  observability, alongside the static frontend.
+
+---
+
+## Deployment
+
+### Frontend — Render Static Site
+
+The Next.js app is configured for **static HTML export** (`output: "export"` in
+`next.config.mjs`); `npm run build` emits a fully static site to `frontend/out/`.
+
+Render Static Site settings:
+
+| Setting | Value |
+|---------|-------|
+| Root directory | `frontend` |
+| Build command | `npm install && npm run build` |
+| Publish directory | `frontend/out` |
+| Env var | `NEXT_PUBLIC_API_BASE_URL` → your hosted backend's `…/api/v1` URL |
+
+**Two caveats** (inherent to static-exporting an API-driven SPA):
+
+1. **The backend must be hosted separately and reachable**, with the static site's origin
+   added to the backend's CORS `ALLOWED_ORIGINS`. The static site does no data fetching on
+   its own — every page calls the API from the browser.
+2. **Deep links to `/submissions/{id}` need an SPA rewrite.** The detail route is
+   client-rendered and its ids aren't known at build time, so only a placeholder page is
+   pre-rendered. In-app navigation from the dashboard works (the id is read from the URL at
+   runtime), but a hard refresh/direct load of a detail URL 404s unless Render is given a
+   rewrite rule (e.g. `/submissions/* → /submissions/_.html`).
+
+### Backend
+
+Not hosted in this submission. The included `Dockerfile` / `docker-compose.yml` run it
+locally; production hosting (container platform + managed Postgres/pgvector) is listed
+under [Future improvements](#20-future-improvements).
 
 ---
 
