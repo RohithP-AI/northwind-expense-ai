@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useParams, usePathname } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ReceiptCard } from "@/components/ReceiptCard";
 import { LoadingState, Spinner } from "@/components/Spinner";
@@ -16,7 +16,19 @@ const ACCEPT = ".pdf,.txt,.jpg,.jpeg,.png";
 
 export default function SubmissionDetailClient() {
   const params = useParams<{ id: string }>();
-  const id = params.id;
+  const pathname = usePathname();
+  // Under static export, /submissions/<uuid> is served by the pre-rendered "_"
+  // placeholder shell, so useParams() can return the build-time "_" instead of
+  // the real id. The browser URL always has the real value, so derive the id
+  // from the path; fall back to the param only if the path can't be read.
+  const id = useMemo(() => {
+    const path =
+      typeof window !== "undefined" ? window.location.pathname : pathname ?? "";
+    const segments = path.split("/").filter(Boolean);
+    const fromPath = segments[0] === "submissions" ? segments[1] : undefined;
+    if (fromPath && fromPath !== "_") return decodeURIComponent(fromPath);
+    return params.id;
+  }, [pathname, params.id]);
 
   const [submission, setSubmission] = useState<SubmissionDetail | null>(null);
   const [loading, setLoading] = useState(true);
