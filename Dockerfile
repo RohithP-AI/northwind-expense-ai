@@ -40,7 +40,10 @@ USER appuser
 
 EXPOSE 8000
 
+# Bind to the port the platform assigns ($PORT, e.g. on Render); default to
+# 8000 for local runs / docker-compose. The health check reads $PORT too.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+    CMD python -c "import os,urllib.request; urllib.request.urlopen('http://localhost:'+os.environ.get('PORT','8000')+'/health')"
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Shell form so ${PORT} is expanded at runtime.
+CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}

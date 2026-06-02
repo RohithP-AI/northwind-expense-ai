@@ -1,0 +1,31 @@
+# Keep the Docker build context small and free of secrets / local artifacts.
+# (On Render the context comes from the git clone, but this also protects local
+#  `docker build` / `docker compose` from baking these into the image.)
+
+# Secrets — never copy env files into the image
+.env
+*.env
+**/.env
+**/.env.local
+
+# Python local env / caches
+backend/.venv/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Runtime upload directory
+backend/uploads/
+
+# Frontend (not part of the backend image)
+frontend/
+
+# VCS / docs / OS noise
+.git/
+.gitignore
+*.md
+.vscode/
+.idea/
+.DS_Store

@@ -1,0 +1,29 @@
+# Render Blueprint for the backend API (FastAPI in Docker).
+#
+# This defines ONLY the backend web service. The frontend is deployed
+# separately as a Render Static Site (see README "Deployment").
+#
+# To use: in the Render dashboard → New → Blueprint → pick this repo. Render
+# reads this file and creates the service. Secret env vars are marked
+# `sync: false`, so you set their values in the dashboard (they are never
+# committed here).
+services:
+  - type: web
+    name: northwind-expense-ai-backend
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # Non-secret
+      - key: ENVIRONMENT
+        value: production
+      # Secrets — set these in the Render dashboard
+      - key: DATABASE_URL
+        sync: false            # postgresql+asyncpg://...  (Supabase Session pooler)
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
