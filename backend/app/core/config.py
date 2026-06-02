@@ -33,7 +33,10 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
 
     # CORS
-    ALLOWED_ORIGINS: list[str] = ["http://localhost:3000"]
+    ALLOWED_ORIGINS: list[str] = [
+        "http://localhost:3000",  # local development
+        "https://northwind-expense-ai-1.onrender.com",  # deployed frontend (Render)
+    ]
 
     @property
     def is_production(self) -> bool:
