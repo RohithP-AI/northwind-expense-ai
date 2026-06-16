@@ -1,5 +1,7 @@
 from app.schemas.employee import EmployeeCreate, EmployeeRead  # noqa: F401
 from app.schemas.policy import (  # noqa: F401
+    PolicyAnswerRequest,
+    PolicyAnswerResponse,
     PolicyChunkCreate,
     PolicyChunkRead,
     PolicyDocumentCreate,

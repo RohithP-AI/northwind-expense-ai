@@ -1,6 +1,7 @@
 import type {
   Employee,
   OverridePayload,
+  PolicyAnswerResponse,
   PolicySearchResponse,
   ReceiptUploadResponse,
   ReviewResponse,
@@ -130,10 +131,14 @@ export const api = {
   overrideVerdict: (verdictId: string, payload: OverridePayload) =>
     jsonRequest<Verdict>(`/verdicts/${verdictId}/override`, "POST", payload),
 
-  // ── Policy search ──────────────────────────────────────────────────────
+  // ── Policy search (raw retrieval — kept for tooling/debugging) ───────────
   policySearch: (query: string, topK = 5) =>
     jsonRequest<PolicySearchResponse>(`/policy/search`, "POST", {
       query,
       top_k: topK,
     }),
+
+  // ── Policy answer (assistant-style: one grounded answer + confidence) ────
+  policyAnswer: (question: string) =>
+    jsonRequest<PolicyAnswerResponse>(`/policy/answer`, "POST", { question }),
 };

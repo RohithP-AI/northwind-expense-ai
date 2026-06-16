@@ -142,3 +142,12 @@ export interface PolicySearchResponse {
   confidence: string;
   results: PolicySearchResult[];
 }
+
+export type PolicyConfidence = "high" | "medium" | "low";
+
+/** Assistant-style policy answer (POST /policy/answer). Intentionally small —
+ *  raw retrieval results / citations are not exposed. */
+export interface PolicyAnswerResponse {
+  answer: string;
+  confidence: PolicyConfidence;
+}

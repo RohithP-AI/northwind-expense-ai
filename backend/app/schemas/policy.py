@@ -1,7 +1,8 @@
 import uuid
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class PolicyDocumentCreate(BaseModel):
@@ -63,3 +64,39 @@ class PolicySearchResponse(BaseModel):
     query: str
     confidence: str  # overall, derived from the best-matching chunk
     results: list[PolicySearchResult]
+
+
+# ── Answer (POST /policy/answer) ──────────────────────────────────────────────
+# The assistant-style endpoint: a single natural-language answer plus a grounded
+# confidence level. Raw retrieval details stay server-side and are intentionally
+# absent from the public response.
+MAX_QUESTION_LENGTH = 500
+
+Confidence = Literal["high", "medium", "low"]
+
+
+class PolicyAnswerRequest(BaseModel):
+    question: str = Field(
+        ...,
+        description="Natural-language policy question.",
+    )
+
+    @field_validator("question")
+    @classmethod
+    def _clean_question(cls, value: str) -> str:
+        cleaned = (value or "").strip()
+        if not cleaned:
+            raise ValueError("Question must not be empty.")
+        if len(cleaned) > MAX_QUESTION_LENGTH:
+            raise ValueError(
+                f"Question is too long (max {MAX_QUESTION_LENGTH} characters)."
+            )
+        return cleaned
+
+
+class PolicyAnswerResponse(BaseModel):
+    # Deliberately small: one human-readable answer and a coarse confidence.
+    # References/citations can be added later (the service already retains the
+    # source chunks internally) without changing this contract.
+    answer: str
+    confidence: Confidence
