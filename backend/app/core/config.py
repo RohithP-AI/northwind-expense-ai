@@ -33,10 +33,24 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
 
     # CORS
+    # Sensible defaults cover local dev and the current Render frontend, so the
+    # app works out of the box. To point at a different deployed frontend, set
+    # FRONTEND_ORIGIN (a single URL) — it is merged into the allowed origins
+    # without having to override the whole list.
     ALLOWED_ORIGINS: list[str] = [
         "http://localhost:3000",  # local development
         "https://northwind-expense-ai-1.onrender.com",  # deployed frontend (Render)
     ]
+    FRONTEND_ORIGIN: str = ""  # optional extra origin from the environment
+
+    @property
+    def cors_origins(self) -> list[str]:
+        """Allowed origins with the optional FRONTEND_ORIGIN merged in (de-duped)."""
+        origins = list(self.ALLOWED_ORIGINS)
+        extra = self.FRONTEND_ORIGIN.strip().rstrip("/")
+        if extra and extra not in origins:
+            origins.append(extra)
+        return origins
 
     @property
     def is_production(self) -> bool:
