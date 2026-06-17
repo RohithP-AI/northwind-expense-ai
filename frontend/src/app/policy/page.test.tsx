@@ -55,9 +55,31 @@ describe("PolicyAssistantPage", () => {
     expect(
       await screen.findByText(/employees can claim up to \$75 per day/i),
     ).toBeInTheDocument();
+    // Exactly one answer card is rendered (no per-chunk result cards).
+    expect(screen.getAllByRole("article")).toHaveLength(1);
     // No raw retrieval terminology leaks into the UI.
     expect(screen.queryByText(/similarity/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/results/i)).not.toBeInTheDocument();
+  });
+
+  it("does not render a Results banner, reference cards, or citations", async () => {
+    policyAnswer.mockResolvedValue({
+      answer: "Employees can claim up to $75 per day for meals.",
+      confidence: "high",
+    });
+    render(<PolicyAssistantPage />);
+
+    await ask("What is the meal limit?");
+
+    await screen.findByText(/employees can claim up to \$75 per day/i);
+    // No "Results" banner / count, no citation or source-reference section.
+    expect(screen.queryByText(/\bresults?\b/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/citation/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/reference/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\bsource/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/page \d/i)).not.toBeInTheDocument();
+    // No document filenames / policy-chunk text rendered.
+    expect(screen.queryByText(/policy\d/i)).not.toBeInTheDocument();
   });
 
   it("renders the confidence badge", async () => {
