@@ -218,6 +218,42 @@ async def test_valid_question_high_confidence(client, monkeypatch):
     assert set(body.keys()) == {"answer", "confidence"}
 
 
+async def test_response_never_exposes_references_or_chunks(client, monkeypatch):
+    """The public contract must not surface any retrieval/citation internals."""
+    patch_retrieval(monkeypatch, chunks=[make_chunk("Meals capped at $75/day.", 0.8)])
+    patch_anthropic(
+        monkeypatch,
+        payload={
+            "answer_found": True,
+            "answer": "Employees can claim up to $75 per day for meals.",
+            "requires_combining": False,
+            "conflicting": False,
+        },
+    )
+    resp = await client.post(
+        "/api/v1/policy/answer", json={"question": "What is the meal limit?"}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    forbidden = {
+        "results",
+        "chunks",
+        "source_chunks",
+        "citations",
+        "policy_citations",
+        "references",
+        "documents",
+        "document_id",
+        "page_number",
+        "section",
+        "similarity",
+        "chunk_text",
+    }
+    assert forbidden.isdisjoint(body.keys())
+    # The answer text itself carries no inline citation markers like "[1]".
+    assert "[1]" not in body["answer"]
+
+
 async def test_valid_question_medium_confidence(client, monkeypatch):
     patch_retrieval(monkeypatch, chunks=[make_chunk("Hotel rules vary by city.", 0.40)])
     patch_anthropic(

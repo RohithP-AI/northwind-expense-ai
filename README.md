@@ -240,6 +240,7 @@ Base prefix `/api/v1` (interactive docs at `/api/v1/docs`).
 | GET | `/api/v1/employees` | List employees (`?department=`) |
 | GET | `/api/v1/employees/{employee_id}` | Fetch one employee |
 | POST | `/api/v1/policy/search` | Semantic policy search (retrieval only, no LLM) |
+| POST | `/api/v1/policy/answer` | Assistant-style policy Q&A — one grounded answer + confidence |
 | POST | `/api/v1/submissions` | Create a submission |
 | GET | `/api/v1/submissions` | List submissions (`?employee_id=&status=&date_from=&date_to=`) |
 | GET | `/api/v1/submissions/{id}` | Submission detail (receipts, verdicts, overrides) |
@@ -248,6 +249,20 @@ Base prefix `/api/v1` (interactive docs at `/api/v1/docs`).
 | POST | `/api/v1/submissions/{id}/review` | Run AI review over un-reviewed receipts |
 | GET | `/api/v1/receipts/{id}/verdict` | Fetch verdict + override trail |
 | POST | `/api/v1/verdicts/{id}/override` | Append a human override |
+
+**`POST /api/v1/policy/answer`** is the user-facing policy assistant. It retrieves the
+most relevant policy passages *internally* (top-3, token-bounded), asks Claude for one
+grounded answer with a single tool call, and returns a deliberately minimal response:
+
+```json
+{ "answer": "Employees can claim up to $75 per day for meals.", "confidence": "high" }
+```
+
+`confidence` is `high | medium | low`, **derived** from real signals (top retrieval
+similarity plus answer-grounding flags), not the model's self-report. The response
+intentionally **does not expose** retrieved chunks, citations, document ids, page
+numbers, or similarity scores, and the answer text contains no inline citation markers.
+`POST /api/v1/policy/search` remains available for raw retrieval (tooling/debugging).
 
 ## 10. Local setup
 

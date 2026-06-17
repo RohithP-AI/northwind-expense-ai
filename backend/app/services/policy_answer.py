@@ -40,11 +40,12 @@ from app.services.retrieval import (
 log = logging.getLogger("policy_answer")
 
 # ── Token-budget controls ─────────────────────────────────────────────────────
-# Retrieve a small number of high-quality chunks and bound the context size so a
-# single answer call stays cheap. These are deliberately conservative.
-TOP_K = 5
+# Retrieve only the minimum useful context. A focused policy question is almost
+# always answered by the top 2–3 passages; pulling more just inflates the prompt
+# (and cost) without improving the answer. These are deliberately conservative.
+TOP_K = 3
 MAX_CHUNK_CHARS = 1200          # truncate any single oversized chunk
-MAX_CONTEXT_CHARS = 6000        # hard cap across all chunks combined
+MAX_CONTEXT_CHARS = 4000        # hard cap across all chunks combined
 
 # Standard, user-facing fallbacks (no internal/RAG terminology).
 NO_ANSWER_MESSAGE = (

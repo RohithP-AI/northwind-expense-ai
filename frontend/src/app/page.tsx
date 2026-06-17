@@ -15,6 +15,9 @@ import type { Employee, Submission } from "@/types";
 export default function DashboardPage() {
   const router = useRouter();
   const [employees, setEmployees] = useState<Employee[]>([]);
+  // Employees only label rows and populate the filter; their fetch is tracked
+  // separately so a failure never blocks the submissions table.
+  const [employeesFailed, setEmployeesFailed] = useState(false);
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -30,7 +33,21 @@ export default function DashboardPage() {
     return map;
   }, [employees]);
 
-  const load = useCallback(async () => {
+  // Employees load once on mount, independently of submissions. A failure is
+  // swallowed (employeesFailed flag) so the submissions table still renders;
+  // the filter then falls back to a disabled state and rows show raw ids.
+  const loadEmployees = useCallback(async () => {
+    setEmployeesFailed(false);
+    try {
+      setEmployees(await api.listEmployees());
+    } catch {
+      setEmployeesFailed(true);
+    }
+  }, []);
+
+  // Submissions reload whenever the filters change. Only a failure of this
+  // request drives the table's error state.
+  const loadSubmissions = useCallback(async () => {
     setLoading(true);
     setError(null);
     const filters: SubmissionFilters = {
@@ -40,25 +57,21 @@ export default function DashboardPage() {
       date_to: dateTo || undefined,
     };
     try {
-      const [emps, subs] = await Promise.all([
-        // Employees are only needed once, but refetching is cheap and keeps the
-        // name map fresh; ignore employee errors so the table still renders.
-        employees.length ? Promise.resolve(employees) : api.listEmployees(),
-        api.listSubmissions(filters),
-      ]);
-      setEmployees(emps);
-      setSubmissions(subs);
+      setSubmissions(await api.listSubmissions(filters));
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to load submissions.");
     } finally {
       setLoading(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [employeeId, status, dateFrom, dateTo]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    loadEmployees();
+  }, [loadEmployees]);
+
+  useEffect(() => {
+    loadSubmissions();
+  }, [loadSubmissions]);
 
   function resetFilters() {
     setEmployeeId("");
@@ -95,9 +108,12 @@ export default function DashboardPage() {
           <select
             value={employeeId}
             onChange={(e) => setEmployeeId(e.target.value)}
-            className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm focus:border-slate-500 focus:outline-none"
+            disabled={employeesFailed}
+            className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm focus:border-slate-500 focus:outline-none disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
           >
-            <option value="">All employees</option>
+            <option value="">
+              {employeesFailed ? "Employees unavailable" : "All employees"}
+            </option>
             {employees.map((e) => (
               <option key={e.employee_id} value={e.employee_id}>
                 {e.name} ({e.employee_id})
@@ -159,7 +175,7 @@ export default function DashboardPage() {
       {loading ? (
         <LoadingState label="Loading submissions…" />
       ) : error ? (
-        <ErrorState message={error} onRetry={load} />
+        <ErrorState message={error} onRetry={loadSubmissions} />
       ) : submissions.length === 0 ? (
         <EmptyState
           title="No submissions found"

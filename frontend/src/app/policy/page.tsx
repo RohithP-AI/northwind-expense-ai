@@ -136,12 +136,12 @@ export default function PolicyAssistantPage() {
       {error && !loading && <ErrorBanner message={error} />}
 
       {answer && !loading && (
-        <article className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-          <div className="mb-3 flex items-center gap-2 text-sm font-medium text-slate-500">
+        <article className="rounded-xl border border-slate-200 bg-white p-8 shadow-sm">
+          <div className="mb-5 flex items-center gap-2 text-sm font-medium text-slate-500">
             <span>Confidence:</span>
             <ConfidenceBadge value={answer.confidence} />
           </div>
-          <div className="space-y-4 whitespace-pre-wrap text-[17px] leading-7 text-slate-800">
+          <div className="whitespace-pre-wrap text-xl leading-9 text-slate-800">
             {answer.answer}
           </div>
         </article>
